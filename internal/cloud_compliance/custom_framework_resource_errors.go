@@ -17,11 +17,13 @@ const (
 	apiOperationDeleteFramework = "delete_framework"
 	apiOperationCreateControl   = "create_control"
 	apiOperationReadControls    = "read_controls"
+	apiOperationCloneFramework  = "clone_framework"
 
 	errorCreatingFramework = "Error Creating Custom Compliance Framework"
 	errorUpdatingFramework = "Error Updating Custom Compliance Framework"
 	errorReadingFramework  = "Error Reading Custom Compliance Framework"
 	errorDeletingFramework = "Error Deleting Custom Compliance Framework"
+	errorCloningFramework  = "Error Cloning Compliance Framework"
 	errorCreatingControl   = "Error Creating Compliance Control"
 	errorUpdatingControl   = "Error Updating Compliance Control"
 	errorAssigningRules    = "Error Assigning Compliance Rules"
@@ -44,6 +46,24 @@ func handleAPIError(err error, operation, id string) diag.Diagnostics {
 	var diags diag.Diagnostics
 
 	switch operation {
+	case apiOperationCloneFramework:
+		if badRequest, ok := err.(*cloud_policies.CloneComplianceFrameworkBadRequest); ok {
+			diags.AddError(errorCloningFramework,
+				fmt.Sprintf("Failed to clone compliance framework (%+v): %+v",
+					*badRequest.Payload.Errors[0].Code,
+					*badRequest.Payload.Errors[0].Message,
+				))
+			return diags
+		}
+		if notFound, ok := err.(*cloud_policies.CloneComplianceFrameworkNotFound); ok {
+			diags.AddError(errorCloningFramework,
+				fmt.Sprintf("Parent compliance framework with ID %s was not found (%+v): %+v",
+					id,
+					notFound.Payload.Errors[0],
+					*notFound.Payload.Errors[0].Message,
+				))
+			return diags
+		}
 	case apiOperationCreateFramework:
 		if badRequest, ok := err.(*cloud_policies.CreateComplianceFrameworkBadRequest); ok {
 			diags.AddError(errorCreatingFramework,

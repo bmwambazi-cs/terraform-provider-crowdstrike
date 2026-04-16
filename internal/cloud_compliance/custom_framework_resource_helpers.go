@@ -61,16 +61,17 @@ func buildCreateFrameworkParams(
 	return params
 }
 
-func buildUpdateFrameworkParams(
-	ctx context.Context,
-	plan cloudComplianceCustomFrameworkResourceModel,
-) *cloud_policies.UpdateComplianceFrameworkParams {
+func buildUpdateFrameworkParams(ctx context.Context, plan cloudComplianceCustomFrameworkResourceModel, setActiveAttribute bool) *cloud_policies.UpdateComplianceFrameworkParams {
 	name := plan.Name.ValueString()
 	description := plan.Description.ValueString()
 
 	updateReq := &models.CommonUpdateComplianceFrameworkRequest{
 		Name:        &name,
 		Description: &description,
+	}
+
+	if setActiveAttribute {
+		updateReq.Active = true
 	}
 
 	params := cloud_policies.NewUpdateComplianceFrameworkParamsWithContext(ctx)

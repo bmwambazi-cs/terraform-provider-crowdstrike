@@ -43,6 +43,18 @@ resource "crowdstrike_cloud_compliance_custom_framework" "example" {
   }
 }
 
+// Clone an existing framework by providing its ID.
+// Sections and controls are inherited from the parent framework.
+resource "crowdstrike_cloud_compliance_custom_framework" "cloned" {
+  name                = "cloned-framework"
+  description         = "A framework cloned from an existing one"
+  parent_framework_id = "7c86a274-c04b-4292-9f03-dafae42bde97"
+}
+
 output "cloud_compliance_custom_framework" {
   value = crowdstrike_cloud_compliance_custom_framework.example
+}
+
+output "cloud_compliance_custom_framework_cloned" {
+  value = crowdstrike_cloud_compliance_custom_framework.cloned
 }

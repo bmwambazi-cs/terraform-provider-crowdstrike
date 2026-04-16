@@ -58,10 +58,11 @@ type cloudComplianceCustomFrameworkResource struct {
 }
 
 type cloudComplianceCustomFrameworkResourceModel struct {
-	ID          types.String `tfsdk:"id"`
-	Name        types.String `tfsdk:"name"`
-	Description types.String `tfsdk:"description"`
-	Sections    types.Map    `tfsdk:"sections"`
+	ID                types.String `tfsdk:"id"`
+	ParentFrameworkID types.String `tfsdk:"parent_framework_id"`
+	Name              types.String `tfsdk:"name"`
+	Description       types.String `tfsdk:"description"`
+	Sections          types.Map    `tfsdk:"sections"`
 }
 
 type SectionTFModel struct {
@@ -142,6 +143,21 @@ func (r *cloudComplianceCustomFrameworkResource) Schema(
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
+			"parent_framework_id": schema.StringAttribute{
+				Optional:            true,
+				MarkdownDescription: "ID of an existing compliance framework to clone. When specified, the framework is created by cloning the parent framework instead of from scratch. Mutually exclusive with `sections`.",
+				Validators: []validator.String{
+					stringvalidator.ConflictsWith(path.MatchRelative().AtParent().AtName("sections")),
+					stringvalidator.RegexMatches(
+						regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`),
+						"must be a valid UUID in the format of 7c86a274-c04b-4292-9f03-dafae42bde97",
+					),
+				},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+					cloneWarning(),
+				},
+			},
 			"name": schema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "The name of the custom compliance framework.",
@@ -158,9 +174,14 @@ func (r *cloudComplianceCustomFrameworkResource) Schema(
 			},
 			"sections": schema.MapNestedAttribute{
 				Optional:            true,
+				Computed:            true,
 				MarkdownDescription: "Map of sections within the framework. Key is an immutable unique string. Changing the section key will trigger a complete delete and create of the section. Sections cannot exist without controls.",
 				Validators: []validator.Map{
+					mapvalidator.ConflictsWith(path.MatchRelative().AtParent().AtName("parent_framework_id")),
 					mapvalidator.KeysAre(stringvalidator.LengthAtLeast(1)),
+				},
+				PlanModifiers: []planmodifier.Map{
+					sectionsDefaultNull(),
 				},
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
@@ -231,10 +252,27 @@ func (r *cloudComplianceCustomFrameworkResource) Create(
 		"name": plan.Name.ValueString(),
 	})
 
-	framework, createFrameworkDiags := r.createFramework(ctx, plan)
-	resp.Diagnostics.Append(createFrameworkDiags...)
-	if resp.Diagnostics.HasError() {
-		return
+	var framework *models.ApimodelsSecurityFramework
+
+	isClone := utils.IsKnown(plan.ParentFrameworkID)
+	if isClone {
+		// Clone from an existing framework
+		clonedFramework, cloneDiags := r.cloneFramework(ctx, plan.ParentFrameworkID.ValueString())
+		resp.Diagnostics.Append(cloneDiags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		framework = clonedFramework
+	} else {
+		// Create from scratch
+		createdFramework, createDiags := r.createFramework(ctx, plan)
+		resp.Diagnostics.Append(createDiags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		framework = createdFramework
 	}
 
 	// Set the ID early for proper cleanup
@@ -244,31 +282,62 @@ func (r *cloudComplianceCustomFrameworkResource) Create(
 		return
 	}
 
-	plan.wrap(ctx, framework)
-	if resp.Diagnostics.HasError() {
-		return
-	}
+	if isClone {
+		// Update the cloned framework with the user's desired name and description
+		params := buildUpdateFrameworkParams(ctx, plan, true)
+		updateResp, err := r.client.CloudPolicies.UpdateComplianceFramework(params)
+		if err != nil {
+			resp.Diagnostics.Append(handleAPIError(err, apiOperationUpdateFramework, plan.ID.ValueString())...)
+			return
+		}
 
-	// Create controls and assign rules if sections are provided
-	var planSectionsMapByKey map[string]SectionTFModel
-	if utils.IsKnown(plan.Sections) {
-		resp.Diagnostics.Append(plan.Sections.ElementsAs(ctx, &planSectionsMapByKey, false)...)
+		payload := updateResp.GetPayload()
+		resp.Diagnostics.Append(validateAPIResponse(payload, errorUpdatingFramework)...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
 
-		// Create controls for this framework
-		resp.Diagnostics.Append(r.createControlsForFramework(ctx, framework.UUID, planSectionsMapByKey)...)
+		// Re-read framework to get updated values
+		updatedFramework, getFrameworkDiags, _ := r.getFramework(ctx, plan.ID.ValueString())
+		resp.Diagnostics.Append(getFrameworkDiags...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
 
-		sections, sectionsDiags := r.readControlsForFramework(ctx, *framework.Name, planSectionsMapByKey)
-		resp.Diagnostics.Append(sectionsDiags...)
+		plan.wrap(ctx, updatedFramework)
+
+		// Read back the cloned controls as the initial state
+		clonedSections, clonedSectionsDiags := r.readControlsForFramework(ctx, plan.Name.ValueString(), nil)
+		resp.Diagnostics.Append(clonedSectionsDiags...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		plan.Sections = sections
+
+		plan.Sections = clonedSections
+	} else {
+		plan.wrap(ctx, framework)
+
+		// Create controls and assign rules if sections are provided
+		var planSectionsMapByKey map[string]SectionTFModel
+		if utils.IsKnown(plan.Sections) {
+			resp.Diagnostics.Append(plan.Sections.ElementsAs(ctx, &planSectionsMapByKey, false)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+
+			resp.Diagnostics.Append(r.createControlsForFramework(ctx, framework.UUID, planSectionsMapByKey)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+
+			sections, sectionsDiags := r.readControlsForFramework(ctx, *framework.Name, planSectionsMapByKey)
+			resp.Diagnostics.Append(sectionsDiags...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+
+			plan.Sections = sections
+		}
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -341,7 +410,7 @@ func (r *cloudComplianceCustomFrameworkResource) Update(
 	})
 
 	if !plan.Name.Equal(state.Name) || !plan.Description.Equal(state.Description) {
-		params := buildUpdateFrameworkParams(ctx, plan)
+		params := buildUpdateFrameworkParams(ctx, plan, false)
 		updateResp, err := r.client.CloudPolicies.UpdateComplianceFramework(params)
 		if err != nil {
 			resp.Diagnostics.Append(handleAPIError(err, apiOperationUpdateFramework, state.ID.ValueString())...)
@@ -393,7 +462,7 @@ func (r *cloudComplianceCustomFrameworkResource) Update(
 		if resp.Diagnostics.HasError() {
 			return
 		}
-	} else if utils.IsKnown(state.Sections) {
+	} else if utils.IsKnown(state.Sections) && !utils.IsKnown(plan.ParentFrameworkID) {
 		// If plan has no sections but state does, delete all existing controls
 		resp.Diagnostics.Append(r.deleteAllControlsForFramework(ctx, plan.Name.ValueString())...)
 		if resp.Diagnostics.HasError() {
@@ -527,6 +596,31 @@ func (r *cloudComplianceCustomFrameworkResource) createFramework(
 
 	payload := createResp.GetPayload()
 	diags.Append(validateAPIResponse(payload, errorCreatingFramework)...)
+	if diags.HasError() {
+		return nil, diags
+	}
+
+	return payload.Resources[0], diags
+}
+
+// cloneFramework clones an existing compliance framework using the clone API.
+func (r *cloudComplianceCustomFrameworkResource) cloneFramework(
+	ctx context.Context,
+	sourceFrameworkID string,
+) (*models.ApimodelsSecurityFramework, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	params := cloud_policies.NewCloneComplianceFrameworkParamsWithContext(ctx)
+	params.Ids = sourceFrameworkID
+
+	cloneResp, err := r.client.CloudPolicies.CloneComplianceFramework(params)
+	if err != nil {
+		diags.Append(handleAPIError(err, apiOperationCloneFramework, sourceFrameworkID)...)
+		return nil, diags
+	}
+
+	payload := cloneResp.GetPayload()
+	diags.Append(validateAPIResponse(payload, errorCloningFramework)...)
 	if diags.HasError() {
 		return nil, diags
 	}
