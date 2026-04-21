@@ -51,10 +51,35 @@ resource "crowdstrike_cloud_compliance_custom_framework" "cloned" {
   parent_framework_id = "7c86a274-c04b-4292-9f03-dafae42bde97"
 }
 
+// Clone a framework and override specific sections/controls.
+// Cloned sections not mentioned here are preserved. Config sections are merged
+// on top: matching section keys merge controls within, new keys are added.
+resource "crowdstrike_cloud_compliance_custom_framework" "cloned_with_overrides" {
+  name                = "cloned-with-overrides"
+  description         = "A cloned framework with custom section overrides"
+  parent_framework_id = "7c86a274-c04b-4292-9f03-dafae42bde97"
+  sections = {
+    "custom-section" = {
+      name = "Custom Section"
+      controls = {
+        "custom-control" = {
+          name        = "Custom Control"
+          description = "A control added on top of the cloned framework"
+          rules       = []
+        }
+      }
+    }
+  }
+}
+
 output "cloud_compliance_custom_framework" {
   value = crowdstrike_cloud_compliance_custom_framework.example
 }
 
 output "cloud_compliance_custom_framework_cloned" {
   value = crowdstrike_cloud_compliance_custom_framework.cloned
+}
+
+output "cloud_compliance_custom_framework_cloned_with_overrides" {
+  value = crowdstrike_cloud_compliance_custom_framework.cloned_with_overrides
 }

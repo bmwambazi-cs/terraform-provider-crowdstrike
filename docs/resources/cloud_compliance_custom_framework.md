@@ -67,8 +67,45 @@ resource "crowdstrike_cloud_compliance_custom_framework" "example" {
   }
 }
 
+// Clone an existing framework by providing its ID.
+// Sections and controls are inherited from the parent framework.
+resource "crowdstrike_cloud_compliance_custom_framework" "cloned" {
+  name                = "cloned-framework"
+  description         = "A framework cloned from an existing one"
+  parent_framework_id = "7c86a274-c04b-4292-9f03-dafae42bde97"
+}
+
+// Clone a framework and override specific sections/controls.
+// Cloned sections not mentioned here are preserved. Config sections are merged
+// on top: matching section keys merge controls within, new keys are added.
+resource "crowdstrike_cloud_compliance_custom_framework" "cloned_with_overrides" {
+  name                = "cloned-with-overrides"
+  description         = "A cloned framework with custom section overrides"
+  parent_framework_id = "7c86a274-c04b-4292-9f03-dafae42bde97"
+  sections = {
+    "custom-section" = {
+      name = "Custom Section"
+      controls = {
+        "custom-control" = {
+          name        = "Custom Control"
+          description = "A control added on top of the cloned framework"
+          rules       = []
+        }
+      }
+    }
+  }
+}
+
 output "cloud_compliance_custom_framework" {
   value = crowdstrike_cloud_compliance_custom_framework.example
+}
+
+output "cloud_compliance_custom_framework_cloned" {
+  value = crowdstrike_cloud_compliance_custom_framework.cloned
+}
+
+output "cloud_compliance_custom_framework_cloned_with_overrides" {
+  value = crowdstrike_cloud_compliance_custom_framework.cloned_with_overrides
 }
 ```
 
@@ -82,6 +119,7 @@ output "cloud_compliance_custom_framework" {
 
 ### Optional
 
+- `parent_framework_id` (String) ID of an existing compliance framework to clone. When specified, the framework is created by cloning the parent framework. If `sections` are also provided, they are merged on top of the cloned sections: config sections/controls override cloned ones at the key level, and cloned sections/controls not mentioned in config are preserved.
 - `sections` (Attributes Map) Map of sections within the framework. Key is an immutable unique string. Changing the section key will trigger a complete delete and create of the section. Sections cannot exist without controls. (see [below for nested schema](#nestedatt--sections))
 
 ### Read-Only

@@ -348,29 +348,6 @@ resource "crowdstrike_cloud_compliance_custom_framework" "test" {
 `,
 			expectError: regexp.MustCompile("The argument \"description\" is required"),
 		},
-		{
-			name: "parent_framework_id_conflicts_with_sections",
-			config: `
-resource "crowdstrike_cloud_compliance_custom_framework" "test" {
-  name = "Framework with conflicting args"
-  description = "Testing conflict between parent_framework_id and sections"
-  parent_framework_id = "7c86a274-c04b-4292-9f03-dafae42bde97"
-  sections = {
-    section1 = {
-      name = "my_section_1"
-      controls = {
-        my_control = {
-          name = "control_name"
-          description = "this is a dummy control"
-          rules = ["rule1"]
-        } 
-      }
-    }
-  }
-}
-`,
-			expectError: regexp.MustCompile("Invalid Attribute Combination"),
-		},
 	}
 
 	for _, tc := range validationTests {
@@ -387,6 +364,37 @@ resource "crowdstrike_cloud_compliance_custom_framework" "test" {
 			})
 		})
 	}
+}
+
+func TestAccCloudComplianceCustomFrameworkResource_ParentFrameworkIDWithSectionsIsValid(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(t) },
+		ProtoV6ProviderFactories: acctest.ProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: acctest.ProviderConfig + `
+resource "crowdstrike_cloud_compliance_custom_framework" "test" {
+  name                = "Framework with clone and sections"
+  description         = "Testing that parent_framework_id and sections can coexist"
+  parent_framework_id = "7c86a274-c04b-4292-9f03-dafae42bde97"
+  sections = {
+    "my-section" = {
+      name = "My Section"
+      controls = {
+        "my-control" = {
+          name        = "My Control"
+          description = "A custom control"
+        }
+      }
+    }
+  }
+}
+`,
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: true,
+			},
+		},
+	})
 }
 
 func TestAccCloudComplianceCustomFrameworkResource_Import(t *testing.T) {

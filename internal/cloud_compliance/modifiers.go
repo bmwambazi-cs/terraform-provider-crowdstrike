@@ -30,7 +30,7 @@ func (m cloneWarningModifier) PlanModifyString(_ context.Context, req planmodifi
 	resp.Diagnostics.AddWarning(
 		"Cloning compliance framework",
 		fmt.Sprintf(
-			"This framework will be created by cloning the parent framework %q. Sections and controls will be inherited from the parent.",
+			"This framework will be created by cloning the parent framework %q. Sections and controls will be inherited from the parent. If sections are also specified in config, they will be merged on top of the cloned sections.",
 			req.PlanValue.ValueString(),
 		),
 	)

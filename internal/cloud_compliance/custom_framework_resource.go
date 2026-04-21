@@ -41,6 +41,7 @@ var (
 	_ resource.ResourceWithConfigure      = &cloudComplianceCustomFrameworkResource{}
 	_ resource.ResourceWithImportState    = &cloudComplianceCustomFrameworkResource{}
 	_ resource.ResourceWithValidateConfig = &cloudComplianceCustomFrameworkResource{}
+	_ resource.ResourceWithModifyPlan     = &cloudComplianceCustomFrameworkResource{}
 )
 
 var (
@@ -145,9 +146,8 @@ func (r *cloudComplianceCustomFrameworkResource) Schema(
 			},
 			"parent_framework_id": schema.StringAttribute{
 				Optional:            true,
-				MarkdownDescription: "ID of an existing compliance framework to clone. When specified, the framework is created by cloning the parent framework instead of from scratch. Mutually exclusive with `sections`.",
+				MarkdownDescription: "ID of an existing compliance framework to clone. When specified, the framework is created by cloning the parent framework. If `sections` are also provided, they are merged on top of the cloned sections: config sections/controls override cloned ones at the key level, and cloned sections/controls not mentioned in config are preserved.",
 				Validators: []validator.String{
-					stringvalidator.ConflictsWith(path.MatchRelative().AtParent().AtName("sections")),
 					stringvalidator.RegexMatches(
 						regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`),
 						"must be a valid UUID in the format of 7c86a274-c04b-4292-9f03-dafae42bde97",
@@ -177,7 +177,6 @@ func (r *cloudComplianceCustomFrameworkResource) Schema(
 				Computed:            true,
 				MarkdownDescription: "Map of sections within the framework. Key is an immutable unique string. Changing the section key will trigger a complete delete and create of the section. Sections cannot exist without controls.",
 				Validators: []validator.Map{
-					mapvalidator.ConflictsWith(path.MatchRelative().AtParent().AtName("parent_framework_id")),
 					mapvalidator.KeysAre(stringvalidator.LengthAtLeast(1)),
 				},
 				PlanModifiers: []planmodifier.Map{
@@ -313,7 +312,50 @@ func (r *cloudComplianceCustomFrameworkResource) Create(
 			return
 		}
 
-		plan.Sections = clonedSections
+		// Check if config also has sections to merge on top of cloned sections
+		var configModel cloudComplianceCustomFrameworkResourceModel
+		resp.Diagnostics.Append(req.Config.Get(ctx, &configModel)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		if utils.IsKnown(configModel.Sections) && utils.IsKnown(clonedSections) {
+			// Merge config sections on top of cloned sections
+			mergedSections, mergeDiags := mergeClonedSections(ctx, clonedSections, configModel.Sections)
+			resp.Diagnostics.Append(mergeDiags...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+
+			// Convert cloned sections to a map for processSectionUpdates
+			var clonedSectionsMap map[string]SectionTFModel
+			resp.Diagnostics.Append(clonedSections.ElementsAs(ctx, &clonedSectionsMap, false)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+
+			var mergedSectionsMap map[string]SectionTFModel
+			resp.Diagnostics.Append(mergedSections.ElementsAs(ctx, &mergedSectionsMap, false)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+
+			resp.Diagnostics.Append(r.processSectionUpdates(ctx, framework.UUID, clonedSectionsMap, mergedSectionsMap)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+
+			// Read back the final state after merging
+			finalSections, finalSectionsDiags := r.readControlsForFramework(ctx, plan.Name.ValueString(), mergedSectionsMap)
+			resp.Diagnostics.Append(finalSectionsDiags...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+
+			plan.Sections = finalSections
+		} else {
+			plan.Sections = clonedSections
+		}
 	} else {
 		plan.wrap(ctx, framework)
 
@@ -547,19 +589,19 @@ func (r *cloudComplianceCustomFrameworkResource) ValidateConfig(
 	req resource.ValidateConfigRequest,
 	resp *resource.ValidateConfigResponse,
 ) {
-	var config cloudComplianceCustomFrameworkResourceModel
-	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	var configModel cloudComplianceCustomFrameworkResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &configModel)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	// Skip validation if sections is null or unknown
-	if config.Sections.IsNull() || config.Sections.IsUnknown() {
+	if configModel.Sections.IsNull() || configModel.Sections.IsUnknown() {
 		return
 	}
 
 	var sections map[string]SectionTFModel
-	resp.Diagnostics.Append(config.Sections.ElementsAs(ctx, &sections, false)...)
+	resp.Diagnostics.Append(configModel.Sections.ElementsAs(ctx, &sections, false)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -580,6 +622,66 @@ func (r *cloudComplianceCustomFrameworkResource) ValidateConfig(
 			)
 		}
 	}
+}
+
+// ModifyPlan merges cloned sections from state with config sections in the plan.
+// This allows users to override specific sections/controls on a cloned framework
+// while preserving cloned sections/controls they did not mention in config.
+func (r *cloudComplianceCustomFrameworkResource) ModifyPlan(
+	ctx context.Context,
+	req resource.ModifyPlanRequest,
+	resp *resource.ModifyPlanResponse,
+) {
+	// Skip on destroy
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+
+	// Skip on create — cloned sections not yet available in state
+	if req.State.Raw.IsNull() {
+		return
+	}
+
+	var configModel cloudComplianceCustomFrameworkResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &configModel)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Skip if not a clone
+	if !utils.IsKnown(configModel.ParentFrameworkID) {
+		return
+	}
+
+	// Skip if config has no sections — Computed copies state to plan automatically
+	if configModel.Sections.IsNull() || configModel.Sections.IsUnknown() {
+		return
+	}
+
+	var state cloudComplianceCustomFrameworkResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// If state has no sections, nothing to merge
+	if !utils.IsKnown(state.Sections) {
+		return
+	}
+
+	var plan cloudComplianceCustomFrameworkResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	merged, mergeDiags := mergeClonedSections(ctx, state.Sections, plan.Sections)
+	resp.Diagnostics.Append(mergeDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("sections"), merged)...)
 }
 
 func (r *cloudComplianceCustomFrameworkResource) createFramework(

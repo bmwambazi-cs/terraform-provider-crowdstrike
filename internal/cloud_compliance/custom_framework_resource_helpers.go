@@ -5,6 +5,7 @@ import (
 
 	"github.com/crowdstrike/gofalcon/falcon/client/cloud_policies"
 	"github.com/crowdstrike/gofalcon/falcon/models"
+	"github.com/crowdstrike/terraform-provider-crowdstrike/internal/utils"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -201,4 +202,111 @@ func convertSectionsTFMapToDomainMapByName(ctx context.Context, sections map[str
 	}
 
 	return sectionsDomainMap, diags
+}
+
+// mergeClonedSections merges state sections (cloned baseline) with plan sections
+// (user config). Plan/config wins on overlap at both section and control key level.
+// State sections not present in plan are preserved from state.
+func mergeClonedSections(
+	ctx context.Context,
+	stateSections types.Map,
+	planSections types.Map,
+) (types.Map, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	var stateMap map[string]SectionTFModel
+	var planMap map[string]SectionTFModel
+
+	diags.Append(stateSections.ElementsAs(ctx, &stateMap, false)...)
+	diags.Append(planSections.ElementsAs(ctx, &planMap, false)...)
+	if diags.HasError() {
+		return planSections, diags
+	}
+
+	merged := make(map[string]SectionTFModel)
+
+	for key, stateSection := range stateMap {
+		merged[key] = stateSection
+	}
+
+	// Overlay plan sections on top
+	for key, planSection := range planMap {
+		stateSection, inState := stateMap[key]
+		if !inState {
+			// New section from config, keep as-is from plan
+			merged[key] = planSection
+			continue
+		}
+
+		// Section exists in both — merge controls within
+		mergedControls, controlDiags := mergeControls(ctx, stateSection.Controls, planSection.Controls)
+		diags.Append(controlDiags...)
+		if diags.HasError() {
+			return planSections, diags
+		}
+
+		merged[key] = SectionTFModel{
+			Name:     planSection.Name,
+			Controls: mergedControls,
+		}
+	}
+
+	result, mapDiags := convertSectionsMapToTerraformMap(ctx, merged)
+	diags.Append(mapDiags...)
+
+	return result, diags
+}
+
+// mergeControls merges state controls (cloned baseline) with plan controls
+// (user config). Plan/config wins on overlap. State controls not in plan are preserved.
+func mergeControls(
+	ctx context.Context,
+	stateControls types.Map,
+	planControls types.Map,
+) (types.Map, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	var stateMap map[string]ControlTFModel
+	var planMap map[string]ControlTFModel
+
+	diags.Append(stateControls.ElementsAs(ctx, &stateMap, false)...)
+	diags.Append(planControls.ElementsAs(ctx, &planMap, false)...)
+	if diags.HasError() {
+		return planControls, diags
+	}
+
+	merged := make(map[string]ControlTFModel)
+
+	// Start with all state controls as baseline
+	for key, stateControl := range stateMap {
+		merged[key] = stateControl
+	}
+
+	// Overlay plan controls on top
+	for key, planControl := range planMap {
+		// Preserve state control's ID for existing controls
+		if stateControl, exists := stateMap[key]; exists && !utils.IsKnown(planControl.ID) {
+			planControl.ID = stateControl.ID
+		}
+		merged[key] = planControl
+	}
+
+	// Convert back to types.Map
+	controlsAttrValue := make(map[string]attr.Value)
+	for key, control := range merged {
+		controlValue, controlDiags := types.ObjectValueFrom(ctx, controlAttrTypes, control)
+		diags.Append(controlDiags...)
+		if diags.HasError() {
+			return planControls, diags
+		}
+		controlsAttrValue[key] = controlValue
+	}
+
+	result, mapDiags := types.MapValue(
+		types.ObjectType{AttrTypes: controlAttrTypes},
+		controlsAttrValue,
+	)
+	diags.Append(mapDiags...)
+
+	return result, diags
 }
