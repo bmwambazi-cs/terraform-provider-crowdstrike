@@ -78,3 +78,34 @@ func (m sectionsDefaultNullModifier) PlanModifyMap(ctx context.Context, req plan
 func sectionsDefaultNull() planmodifier.Map {
 	return sectionsDefaultNullModifier{}
 }
+
+// useStateOrUnknownModifier copies the state value when it exists (like
+// UseStateForUnknown) but sets the plan value to unknown when the state is null.
+// This handles new entries in MapNestedAttribute where the framework sets
+// Computed nested fields to null instead of unknown during Updates.
+type useStateOrUnknownModifier struct{}
+
+func (m useStateOrUnknownModifier) Description(_ context.Context) string {
+	return "Copies state value when available, otherwise sets to unknown."
+}
+
+func (m useStateOrUnknownModifier) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (m useStateOrUnknownModifier) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	// If state has a value, use it (like UseStateForUnknown)
+	if !req.StateValue.IsNull() && !req.StateValue.IsUnknown() {
+		resp.PlanValue = req.StateValue
+		return
+	}
+
+	// New entry — ensure value is unknown, not null
+	if req.PlanValue.IsNull() {
+		resp.PlanValue = types.StringUnknown()
+	}
+}
+
+func useStateOrUnknown() planmodifier.String {
+	return useStateOrUnknownModifier{}
+}
